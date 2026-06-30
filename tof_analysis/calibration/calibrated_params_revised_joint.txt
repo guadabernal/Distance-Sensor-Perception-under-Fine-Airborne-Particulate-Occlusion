@@ -1,0 +1,23 @@
+# Revised VL53L5CX ToF observation-model parameters (revised_joint fit)
+dust_gain = 3.669467069e-05
+concentration_scale_0p8 = 0.2906416091
+concentration_scale_0p2 = 0.1853149769
+lock_intercept = 4.604121215
+lock_gain_evidence = 1.345771599
+false_target_gain = 4861.331651
+false_target_alpha_ref_1_per_m = 1.165534568
+false_target_alpha_power = 7.135206955
+false_target_range_crit_m = 0.3739893407
+false_target_range_width_m = 0.06944750729
+false_target_decay_tau_ref_s = 15.56892092
+false_target_decay_distance_power = 1.348831349
+wall_bias_max_m = 0.02659078453
+wall_bias_centroid_gain = 0.02265304228
+wall_bias_size_power = 3.744355766
+wall_bias_driver_power = 2.069898363
+wall_bias_distance_center_m = 0.2643392361
+wall_bias_distance_width_m = 0.07022328358
+estimator_window_sigma_m = 0.09731682767
+bias_scale = 3.682115749
+sigma_turb = 0.2122254204
+objective = 7.041923116

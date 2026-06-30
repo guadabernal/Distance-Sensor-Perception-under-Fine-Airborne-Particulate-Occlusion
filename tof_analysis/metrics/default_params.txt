@@ -1,0 +1,31 @@
+# Recovery-corrected VL53L5CX ToF observation-model defaults
+# FL-active-regime joint recalibration: false-lock fit only where observed
+# (0.8 g at 40/50/60 cm); 0.2 g and near distances default to zero FL.
+# All trials, no excluded trials. Wired into ToFModelParams in tof_model.py.
+# Captured 2026-06-30.
+dust_gain = 3.669467069e-05
+concentration_scale_0p8 = 0.2906416091
+concentration_scale_0p2 = 0.1853149769
+lock_intercept = 4.604121215
+lock_gain_evidence = 1.345771599
+ambient_lock_gain = 0
+false_target_gain = 4861.331651
+false_target_alpha_ref_1_per_m = 1.165534568
+false_target_alpha_power = 7.135206955
+false_target_range_crit_m = 0.3739893407
+false_target_range_width_m = 0.06944750729
+false_target_distance_ref_m = 0.4
+false_target_distance_power = -1.25
+false_target_decay_tau_ref_s = 15.56892092
+false_target_decay_distance_power = 1.348831349
+wall_bias_centroid_gain = 0.02265304228
+wall_bias_size_power = 3.744355766
+wall_bias_driver_power = 2.069898363
+wall_bias_driver_ref_1_per_m = 1
+wall_bias_size_ref_um = 2.5
+wall_bias_distance_center_m = 0.2643392361
+wall_bias_distance_width_m = 0.07022328358
+wall_bias_max_m = 0.02659078453
+estimator_window_sigma_m = 0.09731682767
+bias_scale = 3.682115749
+sigma_turb = 0.2122254204

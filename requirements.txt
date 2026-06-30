@@ -1,0 +1,6 @@
+matplotlib>=3.8
+miepython>=3.0
+numpy>=1.26
+pandas>=2.0
+scipy>=1.13
+statsmodels>=0.14

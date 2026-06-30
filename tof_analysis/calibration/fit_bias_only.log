@@ -1,0 +1,9 @@
+
+Bias-only fitted parameter block:
+  wall_bias_centroid_gain = 0.01626602422
+  wall_bias_size_power = 4.904183931
+  wall_bias_driver_power = 1.513344683
+  wall_bias_distance_center_m = 0.1841921865
+  wall_bias_distance_width_m = 0.1098611759
+  bias_scale = 0
+  normalized RMS residual = 0.2882

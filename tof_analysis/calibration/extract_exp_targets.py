@@ -1,0 +1,210 @@
+"""Derive EXP_TARGETS_{02,08} (fl_initial, snap_time_min, peak_neg_bias_cm) from processed VL5 data."""
+from __future__ import annotations
+
+import os
+import sys
+import numpy as np
+import pandas as pd
+
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_THIS_DIR))
+
+from tof_analysis import (  # noqa: E402
+    load_experiment, pool_experiment, snap_time_from_fl_series,
+    TIME_BIN_WIDTH_S, DISTANCES_CM, LOADINGS_G, TRIALS,
+    DATA_DIR,
+)
+
+EARLY_WINDOW_S = 180.0
+INITIAL_BIN_MAX_S = 30.0
+FL_INCLUDE_THRESHOLD = 0.05
+OUTPUT_MODULE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'exp_targets.py')
+
+HANDCODED_08 = {
+    'fl_initial':       {10: 0.0,    20: 0.0,    30: 0.016, 40: 0.493, 50: 0.766, 60: 0.961},
+    'snap_time_min':    {40: 0.75,   50: 1.75,   60: 3.25},
+    'peak_neg_bias_cm': {10: 0.010,  20: -1.453, 30: -2.032, 40: -0.439},
+}
+
+
+def _per_distance_metrics(pooled: pd.DataFrame, dist_cm: int):
+    """Compute the three target metrics from one pooled experiment DataFrame."""
+    if pooled is None or len(pooled) == 0:
+        return None
+
+    t = pooled['time_seconds'].values
+    fl = pooled['is_false_lock'].astype(bool).values
+    d = pooled['distance_cm'].values
+
+    init_mask = t < INITIAL_BIN_MAX_S
+    n_init = int(init_mask.sum())
+    fl_initial = float(fl[init_mask].mean()) if n_init > 0 else np.nan
+
+    t_max = float(np.nanmax(t)) if len(t) > 0 else 0.0
+    edges = np.arange(0.0, t_max + TIME_BIN_WIDTH_S, TIME_BIN_WIDTH_S)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    f_fl_bins = np.full(len(centers), np.nan)
+    bias_wall_bins = np.full(len(centers), np.nan)
+
+    for i in range(len(edges) - 1):
+        mask = (t >= edges[i]) & (t < edges[i + 1])
+        if not np.any(mask):
+            continue
+        fl_chunk = fl[mask]
+        d_chunk = d[mask]
+        f_fl_bins[i] = float(fl_chunk.mean())
+        wall = d_chunk[(~fl_chunk) & np.isfinite(d_chunk)]
+        if len(wall) > 0:
+            bias_wall_bins[i] = float(np.mean(wall) - dist_cm)
+
+    snap_s, _, _ = snap_time_from_fl_series(centers, f_fl_bins,
+                                            threshold=0.05, n_confirm=3)
+    snap_min = snap_s / 60.0 if np.isfinite(snap_s) else np.nan
+
+    early_mask = centers <= EARLY_WINDOW_S
+    early_bias = bias_wall_bins[early_mask]
+    if np.any(np.isfinite(early_bias)):
+        peak_neg_bias = float(np.nanmin(early_bias))
+    else:
+        peak_neg_bias = np.nan
+
+    return {
+        'fl_initial': fl_initial,
+        'snap_time_min': snap_min,
+        'peak_neg_bias_cm': peak_neg_bias,
+        'n_readings_initial': n_init,
+        'n_pooled': len(pooled),
+    }
+
+
+def load_all():
+    all_data = {}
+    for grams in LOADINGS_G:
+        for trial in TRIALS:
+            for dist_cm in DISTANCES_CM:
+                key = (grams, trial, dist_cm)
+                all_data[key] = load_experiment(grams, trial, dist_cm)
+    return all_data
+
+
+def build_targets(per_dist_per_loading):
+    """Apply inclusion rules to per-distance-per-loading metric dicts."""
+    targets = {}
+    for grams, per_dist in per_dist_per_loading.items():
+        block = {'fl_initial': {}, 'snap_time_min': {}, 'peak_neg_bias_cm': {}}
+
+        for dist_cm in sorted(per_dist.keys()):
+            m = per_dist[dist_cm]
+            if m is None:
+                continue
+            fl_init = m['fl_initial']
+            snap_min = m['snap_time_min']
+            pnb = m['peak_neg_bias_cm']
+
+            if np.isfinite(fl_init) and fl_init >= FL_INCLUDE_THRESHOLD:
+                block['fl_initial'][dist_cm] = round(float(fl_init), 3)
+
+            if (np.isfinite(snap_min) and snap_min > 0.0
+                    and np.isfinite(fl_init) and fl_init >= FL_INCLUDE_THRESHOLD):
+                block['snap_time_min'][dist_cm] = round(float(snap_min), 2)
+
+            if np.isfinite(pnb):
+                block['peak_neg_bias_cm'][dist_cm] = round(float(pnb), 3)
+
+        targets[grams] = block
+    return targets
+
+
+def format_dict_block(name: str, block: dict) -> str:
+    def _fmt_inner(d):
+        items = ', '.join(f'{k}: {v}' for k, v in sorted(d.items()))
+        return '{' + items + '}'
+    lines = [f'{name} = {{']
+    for key in ['fl_initial', 'snap_time_min', 'peak_neg_bias_cm']:
+        lines.append(f'    {key!r}:       {_fmt_inner(block[key])},'
+                     if key == 'fl_initial' else
+                     f'    {key!r}:    {_fmt_inner(block[key])},'
+                     if key == 'snap_time_min' else
+                     f'    {key!r}: {_fmt_inner(block[key])},')
+    lines.append('}')
+    return '\n'.join(lines)
+
+
+def write_targets_module(targets: dict, path: str):
+    block_02 = format_dict_block('EXP_TARGETS_02', targets[0.2])
+    block_08 = format_dict_block('EXP_TARGETS_08', targets[0.8])
+    header = (
+        '"""exp_targets.py - auto-generated by extract_exp_targets.py.\n\n'
+        'Experimental summary targets used by tof_calibrate.py. Re-run\n'
+        'extract_exp_targets.py whenever the processed data changes.\n'
+        '"""\n'
+    )
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(header + '\n')
+        f.write(block_02 + '\n\n')
+        f.write(block_08 + '\n')
+
+
+def print_comparison(handcoded: dict, computed: dict):
+    print('\nSanity check - 0.8 g computed vs hand-coded:')
+    for key in ['fl_initial', 'snap_time_min', 'peak_neg_bias_cm']:
+        h = handcoded[key]
+        c = computed[key]
+        all_dists = sorted(set(h.keys()) | set(c.keys()))
+        print(f'  {key}:')
+        print(f'    {"dist":>5s}  {"hand":>10s}  {"computed":>10s}  {"|diff|":>8s}')
+        for d in all_dists:
+            hv = h.get(d, np.nan)
+            cv = c.get(d, np.nan)
+            diff = abs(hv - cv) if (np.isfinite(hv) and np.isfinite(cv)) else np.nan
+            hv_s = f'{hv:>10.3f}' if np.isfinite(hv) else f'{"--":>10s}'
+            cv_s = f'{cv:>10.3f}' if np.isfinite(cv) else f'{"--":>10s}'
+            diff_s = f'{diff:>8.3f}' if np.isfinite(diff) else f'{"--":>8s}'
+            print(f'    {d:>5d}  {hv_s}  {cv_s}  {diff_s}')
+
+
+def print_metrics_table(per_dist_per_loading: dict):
+    print('\nFull per-distance metrics:')
+    for grams in sorted(per_dist_per_loading.keys()):
+        per_dist = per_dist_per_loading[grams]
+        print(f'  {grams} g:')
+        print(f'    {"dist":>5s}  {"fl_init":>8s}  {"snap_min":>9s}  '
+              f'{"peak_neg":>9s}  {"n_init":>7s}  {"n_pool":>7s}')
+        for d in sorted(per_dist.keys()):
+            m = per_dist[d]
+            if m is None:
+                print(f'    {d:>5d}  {"--":>8s}  {"--":>9s}  {"--":>9s}  '
+                      f'{"--":>7s}  {"--":>7s}')
+                continue
+            fi = f'{m["fl_initial"]:>8.3f}' if np.isfinite(m['fl_initial']) else f'{"--":>8s}'
+            sm = f'{m["snap_time_min"]:>9.3f}' if np.isfinite(m['snap_time_min']) else f'{"--":>9s}'
+            pn = f'{m["peak_neg_bias_cm"]:>9.3f}' if np.isfinite(m['peak_neg_bias_cm']) else f'{"--":>9s}'
+            print(f'    {d:>5d}  {fi}  {sm}  {pn}  '
+                  f'{m["n_readings_initial"]:>7d}  {m["n_pooled"]:>7d}')
+
+
+def main():
+    print(f'Loading experimental data from {DATA_DIR} ...')
+    all_data = load_all()
+
+    per_dist_per_loading = {}
+    for grams in LOADINGS_G:
+        per_dist = {}
+        for dist_cm in DISTANCES_CM:
+            pooled = pool_experiment(all_data, grams, dist_cm)
+            per_dist[dist_cm] = _per_distance_metrics(pooled, dist_cm)
+        per_dist_per_loading[grams] = per_dist
+
+    print_metrics_table(per_dist_per_loading)
+
+    targets = build_targets(per_dist_per_loading)
+
+    print_comparison(HANDCODED_08, targets[0.8])
+
+    write_targets_module(targets, OUTPUT_MODULE)
+    print(f'\nWrote {OUTPUT_MODULE}')
+
+
+if __name__ == '__main__':
+    main()
