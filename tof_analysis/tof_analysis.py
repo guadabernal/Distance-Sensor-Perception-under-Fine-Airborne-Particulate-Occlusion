@@ -1,14 +1,19 @@
 """VL53L5CX ToF model vs experiment pipeline; outputs timeseries_metrics.csv and scalar_metrics.csv."""
 
 import os
+import sys
 import numpy as np
 import pandas as pd
 from scipy.stats import wasserstein_distance as _wasserstein
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', 'dust_model'))
 
 from tof_model import (
     time_series, build_psd, build_dust_data,
     SIM_N_FRAMES, SETTLING_TIME_S, DEFAULT_PARAMS, ToFModelParams,
 )
+from dust_model import get_measurement_total_concentration_g_m3
 
 
 CENTER_CELLS = [27, 28, 35, 36]
@@ -117,11 +122,18 @@ def run_model_stochastic(dist_cm, mass_g, t_grid_s, n_frames=N_FRAMES_ANALYSIS, 
 
     is_fl = np.where(np.isnan(data_cm), False, data_cm < threshold_cm)
 
+    C_air_g_m3 = np.interp(
+        t_grid_s,
+        dust_data['t_s'],
+        dust_data['C_total_chamber_mg_m3'],
+    ) / 1000.0
+
     return {
         't_s': t_grid_s,
         'distances_m': data_m,
         'distances_cm': data_cm,
         'is_false_lock': is_fl,
+        'C_air_g_m3': C_air_g_m3,
     }
 
 
@@ -165,6 +177,13 @@ def snap_time_from_fl_series(time_centers_s, f_fl_values, threshold=0.05,
                 return np.nan, False, True
 
     return np.nan, False, True
+
+
+def concentration_at_time_g_m3(loading_g, t_s):
+    if t_s is None or not np.isfinite(t_s):
+        return np.nan
+    return float(get_measurement_total_concentration_g_m3(
+        loading_g, np.array([float(t_s)]))[0])
 
 
 def _bin_stats_exp(pooled, t_lo, t_hi, dist_cm):
@@ -262,6 +281,8 @@ def compute_timeseries_metrics(all_data, loading_g):
     """Compute parallel time-binned metrics for all distances at one loading."""
     t_grid = make_model_time_grid()
     bin_edges, bin_centers = make_time_bins(900.0)
+    bin_c_g_m3 = get_measurement_total_concentration_g_m3(
+        loading_g, bin_centers)
     rows = []
 
     for dist_cm in DISTANCES_CM:
@@ -292,6 +313,8 @@ def compute_timeseries_metrics(all_data, loading_g):
                 'dist_cm': dist_cm,
                 'time_bin_center_s': tc,
                 'time_bin_center_min': tc / 60.0,
+                'C_air_g_m3': bin_c_g_m3[i],
+                'C_air_mg_m3': 1000.0 * bin_c_g_m3[i],
             }
 
             vals_exp = exp.pop('_vals_exp')
@@ -426,6 +449,10 @@ def compute_scalar_metrics(ts_metrics, all_data, loading_g):
         row['is_always_wall_locked_mod'] = awl_mod
         row['is_never_snapped_exp'] = ns_exp
         row['is_never_snapped_mod'] = ns_mod
+
+        row['C_air_initial_g_m3'] = concentration_at_time_g_m3(loading_g, 0.0)
+        row['C_air_snap_exp_g_m3'] = concentration_at_time_g_m3(loading_g, snap_exp)
+        row['C_air_snap_mod_g_m3'] = concentration_at_time_g_m3(loading_g, snap_mod)
 
         mask_exp = sub['bias_wall_mean_exp'].notna()
         mask_mod = sub['bias_wall_mean_mod'].notna()
@@ -631,6 +658,7 @@ __all__ = [
     'model_stochastic',
     'compute_timeseries_metrics',
     'compute_scalar_metrics',
+    'concentration_at_time_g_m3',
     'DISTANCES_CM', 'LOADINGS_G', 'TRIALS',
     'FL_THRESHOLD_FRAC', 'TIME_BIN_WIDTH_S', 'STEADY_STATE_START_S',
     'DATA_DIR', 'OUTPUT_DIR',

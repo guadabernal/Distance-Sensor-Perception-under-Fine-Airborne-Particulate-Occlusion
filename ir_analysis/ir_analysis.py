@@ -69,7 +69,7 @@ def multi_trial_block_average(grams, distance_cm, phase='measurement'):
     block_time = block_time[:min_len]
     stacked = np.column_stack([b[:min_len] for b in block_dists])
 
-    return block_time, stacked.mean(axis=1), stacked.std(axis=1)
+    return block_time, stacked.mean(axis=1), stacked.std(axis=1, ddof=1)
 
 
 def _is_valid(dist_cm):

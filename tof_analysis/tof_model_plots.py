@@ -8,7 +8,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 try:
-    from plot_style import setup_ieee_style, save_fig, IEEE_DOUBLE_COL, IEEE_SINGLE_COL, LOADING_COLORS, DISTANCE_COLORS, PANEL_YLIMS
+    from plot_style import (setup_ieee_style, save_fig, IEEE_DOUBLE_COL, IEEE_SINGLE_COL,
+                            LOADING_COLORS, DISTANCE_COLORS, PANEL_YLIMS,
+                            sort_by_concentration, CONC_AXIS_LABEL_SHORT)
 except Exception:
     IEEE_DOUBLE_COL, IEEE_SINGLE_COL = 7.16, 3.5
     LOADING_COLORS = {0.2: 'tab:blue', 0.8: 'tab:red'}
@@ -16,6 +18,11 @@ except Exception:
     PANEL_YLIMS = {10:(0,20),20:(0,30),30:(0,40),40:(0,50),50:(0,60),60:(0,70)}
     def setup_ieee_style(): pass
     def save_fig(fig, path): fig.savefig(path, dpi=300, bbox_inches='tight')
+    CONC_AXIS_LABEL_SHORT = r'$C_{\mathrm{air}}$ (g m$^{-3}$)'
+    def sort_by_concentration(c_g_m3, *arrays):
+        c = np.asarray(c_g_m3, dtype=float)
+        order = np.argsort(c, kind='mergesort')
+        return (c[order],) + tuple(np.asarray(a)[order] for a in arrays)
 
 from tof_model import (build_dust_data, time_series, noiseless_series,
                        compute_evidence_series,
@@ -29,32 +36,44 @@ PLOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plots')
 METRICS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'metrics')
 
 
-def plot_distance_vs_time(mass_g=0.8):
+def plot_distance_vs_time(mass_g=0.8, x_axis='time'):
     setup_ieee_style(); os.makedirs(PLOT_DIR, exist_ok=True)
     t_min = np.unique(np.concatenate([np.linspace(0, 10, 160), np.linspace(10, SIM_T_MAX_MIN, 30)]))
     dust = build_dust_data(mass_g)
+    conc = lambda t_s: np.interp(t_s, dust['t_s'], dust['C_total_chamber_mg_m3']) / 1000.0
+    x = t_min if x_axis == 'time' else conc(t_min * 60.0)
     fig, axes = plt.subplots(3, 2, figsize=(IEEE_DOUBLE_COL, 6.0)); axes = axes.ravel()
     for ax, d_cm in zip(axes, DISTANCES_CM):
         D = d_cm/100.0
         data = time_series(D, t_min, mass_g, n_frames=SIM_N_FRAMES, dust_data=dust)
         det = noiseless_series(D, t_min, mass_g, dust_data=dust)
-        flat_t = np.repeat(t_min, SIM_N_FRAMES); flat_d = data.ravel()*100
+        flat_x = np.repeat(x, SIM_N_FRAMES); flat_d = data.ravel()*100
         valid = np.isfinite(flat_d); fl = valid & (flat_d < 0.70*d_cm); wall = valid & ~fl
-        ax.scatter(flat_t[wall], flat_d[wall], s=0.6, alpha=0.30, color='tab:blue', linewidths=0, rasterized=True)
-        ax.scatter(flat_t[fl], flat_d[fl], s=0.8, alpha=0.45, color='tab:red', linewidths=0, rasterized=True)
-        ax.plot(t_min, det*100, color='0.15', ls='--', lw=0.8)
+        ax.scatter(flat_x[wall], flat_d[wall], s=0.6, alpha=0.30, color='tab:blue', linewidths=0, rasterized=True)
+        ax.scatter(flat_x[fl], flat_d[fl], s=0.8, alpha=0.45, color='tab:red', linewidths=0, rasterized=True)
+        ax.plot(*((x, det*100) if x_axis == 'time' else sort_by_concentration(x, det*100)),
+                color='0.15', ls='--', lw=0.8)
         ax.axhline(d_cm, color='tab:green', lw=0.8)
         st, _, _ = compute_snap_threshold(D, mass_g, dust_data=dust)
-        if st is not None: ax.axvline(st, color='tab:orange', ls=':', lw=0.8)
-        ax.set_title(f'{d_cm} cm'); ax.set_xlim(-0.2, SIM_T_MAX_MIN+0.2)
+        if st is not None: ax.axvline(st if x_axis == 'time' else float(conc(st * 60.0)), color='tab:orange', ls=':', lw=0.8)
+        if x_axis == 'time':
+            ax.set_title(f'{d_cm} cm'); ax.set_xlim(-0.2, SIM_T_MAX_MIN+0.2)
+        else:
+            pad = 0.02 * (x.max() - x.min())
+            ax.set_title(f'{d_cm} cm'); ax.set_xlim(x.min() - pad, x.max() + pad)
         ax.set_ylim(*PANEL_YLIMS.get(d_cm, (0, max(70, d_cm+10))))
-        ax.set_xlabel('Time since first sample (min)'); ax.set_ylabel('Distance (cm)')
+        ax.set_xlabel('Time since first sample (min)' if x_axis == 'time' else CONC_AXIS_LABEL_SHORT); ax.set_ylabel('Distance (cm)')
         ax.grid(True, ls='--', lw=0.4, alpha=0.4)
-    fig.suptitle(f'Corrected VL53L5CX model, {mass_g} g; measurement starts {SETTLING_TIME_S:.0f} s post-injection\n'
-                 f'alpha(t=0)={dust["alpha_ext_1_per_m"][0]:.3g} 1/m, K_dust={DEFAULT_PARAMS.dust_gain:.3g}, '
-                 f'K_false={DEFAULT_PARAMS.false_target_gain:.3g}', fontsize=9)
+    if x_axis == 'time':
+        fig.suptitle(f'Corrected VL53L5CX model, {mass_g} g; measurement starts {SETTLING_TIME_S:.0f} s post-injection\n'
+                     f'alpha(t=0)={dust["alpha_ext_1_per_m"][0]:.3g} 1/m, K_dust={DEFAULT_PARAMS.dust_gain:.3g}, '
+                     f'K_false={DEFAULT_PARAMS.false_target_gain:.3g}', fontsize=9)
+    else:
+        fig.suptitle(f'Corrected VL53L5CX model, {mass_g} g; x-axis: model-estimated chamber-average\n'
+                     f'airborne concentration (measurement starts {SETTLING_TIME_S:.0f} s post-injection); '
+                     f'alpha(t=0)={dust["alpha_ext_1_per_m"][0]:.3g} 1/m', fontsize=9)
     fig.tight_layout(rect=[0,0,1,0.93])
-    path = os.path.join(PLOT_DIR, f'fig_m1_distance_vs_time_{mass_g}g.png')
+    path = os.path.join(PLOT_DIR, f'fig_m1_distance_vs_{"time" if x_axis == "time" else "concentration"}_{mass_g}g.png')
     save_fig(fig, path); plt.close(fig); print(f'Saved {path}')
 
 
@@ -76,6 +95,7 @@ def generate_model_metrics():
 def generate_plots():
     for g in LOADINGS_G:
         plot_distance_vs_time(g)
+        plot_distance_vs_time(g, x_axis='conc')
     generate_model_metrics()
 
 if __name__ == '__main__':

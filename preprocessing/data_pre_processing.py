@@ -11,8 +11,8 @@ from scipy.signal import savgol_filter
 
 IR_CAL_A = 18.125
 IR_CAL_B = 0.844
-VL5_CAL_OFFSET = 0.441
-VL5_CAL_SCALE = 1.02
+VL5_CAL_SLOPE = 1.0161390209790206
+VL5_CAL_INTERCEPT_CM = -0.44086818181819826
 
 
 CONTROL_WINDOW_S = 20.0
@@ -46,8 +46,8 @@ def calibrate_ir_distance(voltage):
 
 
 def calibrate_vl5_distance(measured_mm):
-    measured_mm = np.asarray(measured_mm, dtype=float)
-    return ((measured_mm + VL5_CAL_OFFSET) / VL5_CAL_SCALE) / 10.0
+    measured_cm = np.asarray(measured_mm, dtype=float) / 10.0
+    return (measured_cm - VL5_CAL_INTERCEPT_CM) / VL5_CAL_SLOPE
 
 
 def compute_ir_filtered_voltage(voltage_series, window=5):

@@ -166,6 +166,10 @@ def compute_measurement_optics(
         't_s': np.asarray(t_meas_s, dtype=float),
         'alpha_ext_1_per_m': alpha_ext,
         'beta_back_1_per_m_sr': beta_back,
+        'C_bins_chamber_mg_m3': dust['C_bins_mg_m3'],
+        'C_total_chamber_mg_m3': dust['C_total_mg_m3'],
+        'C_bins_effective_mg_m3': dust['C_bins_mg_m3'] * float(concentration_scale),
+        'C_total_effective_mg_m3': dust['C_total_mg_m3'] * float(concentration_scale),
     }
 
 
@@ -204,4 +208,6 @@ def simulate_experiment(
         'alpha_ext_1_per_m': alpha,
         'T_roundtrip': np.exp(-2.0 * alpha * d_m),
         'distance_est_cm': d_est_m * 100.0,
+        'C_total_chamber_mg_m3': optics['C_total_chamber_mg_m3'],
+        'C_air_g_m3': optics['C_total_chamber_mg_m3'] / 1000.0,
     }

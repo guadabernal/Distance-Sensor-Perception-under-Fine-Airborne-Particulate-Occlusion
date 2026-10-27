@@ -12,9 +12,12 @@ from plot_style import (
     setup_ieee_style, save_fig,
     IEEE_SINGLE_COL, IEEE_DOUBLE_COL,
     TOL_MUTED, LOADING_COLORS, DISTANCE_COLORS,
+    sort_by_concentration, CONC_AXIS_LABEL_TWO_LINE,
 )
 
 from ir_model import simulate_experiment
+
+CONC_XLIMS = {0.2: (0.9, 2.35), 0.8: (3.8, 9.1)}
 
 
 def plot_beta_and_transmittance(results_02, results_08, save_path):
@@ -49,18 +52,26 @@ def plot_beta_and_transmittance(results_02, results_08, save_path):
     print(f'Saved: {save_path}')
 
 
-def plot_distance_bias(bias_data, save_path):
-    """Distance error vs time for multiple true distances."""
+def plot_distance_bias(bias_data, save_path, x_axis='time'):
+    """Distance error vs time (or modeled C_air) for multiple true distances."""
     setup_ieee_style()
     fig, (ax_lo, ax_hi) = plt.subplots(
         1, 2, figsize=(IEEE_DOUBLE_COL, 2.8))
 
     for ax, mass, title in [(ax_lo, 0.2, '0.2 g'), (ax_hi, 0.8, '0.8 g')]:
-        for d_cm, t_min, error_cm in bias_data[mass]:
-            ax.plot(t_min, error_cm, color=DISTANCE_COLORS[d_cm],
+        for d_cm, t_s, error_cm, c_air in bias_data[mass]:
+            if x_axis == 'conc':
+                x, error_cm = sort_by_concentration(c_air, error_cm)
+            else:
+                x = t_s / 60.0
+            ax.plot(x, error_cm, color=DISTANCE_COLORS[d_cm],
                     label=f'{d_cm} cm')
         ax.axhline(0, color='0.4', ls='--', lw=0.6)
-        ax.set_xlabel('Time (min)')
+        if x_axis == 'conc':
+            ax.set_xlim(CONC_XLIMS[mass])
+            ax.set_xlabel(CONC_AXIS_LABEL_TWO_LINE)
+        else:
+            ax.set_xlabel('Time (min)')
         ax.set_ylabel('Distance error (cm)')
         ax.set_title(f'Distance error ({title})')
         ax.legend(title='True dist.', fontsize=6, title_fontsize=7)
@@ -108,11 +119,14 @@ def generate_plots():
         bias_data[mass] = []
         for d_cm in true_distances_cm:
             res = simulate_experiment(distance_cm=d_cm, mass_g=mass)
-            t_min = res['t_s'] / 60.0
             error_cm = res['distance_est_cm'] - d_cm
-            bias_data[mass].append((d_cm, t_min, error_cm))
+            bias_data[mass].append(
+                (d_cm, res['t_s'], error_cm, res['C_air_g_m3']))
     plot_distance_bias(
         bias_data, os.path.join(output_dir, 'distance_bias.png'))
+    plot_distance_bias(
+        bias_data, os.path.join(output_dir, 'distance_bias_vs_concentration.png'),
+        x_axis='conc')
 
     distances_cm = np.arange(5, 65, 1)
     transmittance_data = {}

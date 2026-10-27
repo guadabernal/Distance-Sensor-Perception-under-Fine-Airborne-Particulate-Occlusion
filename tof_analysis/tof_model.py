@@ -24,12 +24,12 @@ MEASUREMENT_DURATION_S = SIM_T_MAX_MIN * 60.0
 
 @dataclass(frozen=True)
 class ToFModelParams:
-    concentration_scale_0p2: float = 0.1853149769
-    concentration_scale_0p8: float = 0.2906416091
+    concentration_scale_0p2: float = 0.02076782107
+    concentration_scale_0p8: float = 0.1292988821
     backscatter_mode: str = 'lidar_ratio'
     s_eff_sr: float = S_LIDAR
     beta_mie_scale: float = 1.0
-    dust_gain: float = 3.669467069e-05
+    dust_gain: float = 0.000508777901
     wall_signal_ref: float = 1.0
     wall_reflectance: float = GAMMA
     wall_distance_power: float = 2.0
@@ -40,23 +40,23 @@ class ToFModelParams:
     r_overlap_m: float = R_OV
     overlap_power: float = 2.0
     n_quad: int = 80
-    lock_intercept: float = 4.604121215
-    lock_gain_evidence: float = 1.345771599
+    lock_intercept: float = 0.3949680979
+    lock_gain_evidence: float = 6.775903579
     ambient_lock_gain: float = 0.0
     target_order: str = 'strongest'
-    estimator_window_sigma_m: float = 0.09731682767
-    bias_scale: float = 3.682115749
+    estimator_window_sigma_m: float = 0.1321565089
+    bias_scale: float = 4.527251326
     clean_bias_m: float = 0.0
 
-    wall_bias_max_m: float = 0.02659078453
-    wall_bias_centroid_gain: float = 0.02265304228
-    wall_bias_size_power: float = 3.744355766
-    wall_bias_driver_power: float = 2.069898363
+    wall_bias_max_m: float = 0.03755028153
+    wall_bias_centroid_gain: float = 0.004217931999
+    wall_bias_size_power: float = 5.946884595
+    wall_bias_driver_power: float = 2.576580934
     wall_bias_driver_ref_1_per_m: float = 1.0
     wall_bias_size_ref_um: float = 2.5
-    wall_bias_distance_center_m: float = 0.2643392361
-    wall_bias_distance_width_m: float = 0.07022328358
-    sigma_turb: float = 0.2122254204
+    wall_bias_distance_center_m: float = 0.2704415454
+    wall_bias_distance_width_m: float = 0.06418999076
+    sigma_turb: float = 0.100307231
     wall_noise_base_m: float = 0.003
     wall_noise_signal_coeff_m: float = 0.002
     false_noise_m: float = 0.008
@@ -69,15 +69,15 @@ class ToFModelParams:
     xtalk_gain: float = 0.0
     xtalk_range_m: float = 0.035
 
-    false_target_gain: float = 4861.331651
-    false_target_alpha_ref_1_per_m: float = 1.165534568
-    false_target_alpha_power: float = 7.135206955
-    false_target_range_crit_m: float = 0.3739893407
-    false_target_range_width_m: float = 0.06944750729
+    false_target_gain: float = 613.9308661
+    false_target_alpha_ref_1_per_m: float = 0.7166664111
+    false_target_alpha_power: float = 3.500879256
+    false_target_range_crit_m: float = 0.2668361371
+    false_target_range_width_m: float = 0.04168961319
     false_target_distance_ref_m: float = 0.40
     false_target_distance_power: float = -1.25
-    false_target_decay_tau_ref_s: float = 15.56892092
-    false_target_decay_distance_power: float = 1.348831349
+    false_target_decay_tau_ref_s: float = 88.54694228
+    false_target_decay_distance_power: float = 1.22019114
 
     max_reported_range_m: float = 4.0
 
@@ -137,6 +137,10 @@ def _beta_effective(alpha, beta_mie, params):
         return beta_mie * float(params.beta_mie_scale)
     raise ValueError("backscatter_mode must be 'lidar_ratio' or 'mie'")
 
+def size_weighted_bias_driver(alpha_bins_ext, d_rep_um, params=DEFAULT_PARAMS):
+    size_weight = (np.asarray(d_rep_um) / max(float(params.wall_bias_size_ref_um), 1.0e-12)) ** float(params.wall_bias_size_power)
+    return np.sum(alpha_bins_ext * size_weight[None, :], axis=1)
+
 def build_dust_data(mass_g, t_meas_s=None, measurement_duration_s=MEASUREMENT_DURATION_S,
                     settling_time_s=SETTLING_TIME_S, params=DEFAULT_PARAMS):
     t = np.arange(0.0, float(measurement_duration_s) + DT_S, DT_S) if t_meas_s is None else np.asarray(t_meas_s, dtype=float)
@@ -148,8 +152,7 @@ def build_dust_data(mass_g, t_meas_s=None, measurement_duration_s=MEASUREMENT_DU
     alpha = alpha_bins_ext.sum(axis=1)
     alpha_s = compute_extinction_coefficient(Ckg, psd['d_rep_um'], psd['QSCA'])
     beta_mie = compute_volume_backscatter_coefficient(Ckg, psd['d_rep_um'], psd['QBACK'])
-    size_weight = (psd['d_rep_um'] / max(float(params.wall_bias_size_ref_um), 1.0e-12)) ** float(params.wall_bias_size_power)
-    wall_bias_driver = np.sum(alpha_bins_ext * size_weight[None, :], axis=1)
+    wall_bias_driver = size_weighted_bias_driver(alpha_bins_ext, psd['d_rep_um'], params)
     beta = _beta_effective(alpha, beta_mie, params)
     sca_bins = Ckg * (3.0*psd['QSCA'][None, :])/(2.0*RHO_P*(psd['d_rep_um'][None, :]*1e-6))
     omega0 = np.divide(alpha_s, alpha, out=np.zeros_like(alpha), where=alpha>0)
@@ -161,7 +164,7 @@ def build_dust_data(mass_g, t_meas_s=None, measurement_duration_s=MEASUREMENT_DU
             'w_i': meas['w_i'], 'C_0_mg_m3': meas['C_0_mg_m3'],
             'alpha_ext_1_per_m': alpha, 'alpha_sca_1_per_m': alpha_s,
             'beta_mie_1_per_m_sr': beta_mie, 'beta_back_1_per_m_sr': beta,
-            'wall_bias_driver_1_per_m': wall_bias_driver,
+            'wall_bias_driver_1_per_m': wall_bias_driver, 'alpha_bins_ext_1_per_m': alpha_bins_ext,
             'omega0': omega0, 'g_bulk': g_bulk}
 
 def _idx(t_s, t_arr):

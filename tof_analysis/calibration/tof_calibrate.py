@@ -1,10 +1,11 @@
-"""Fit VL53L5CX ToF observation parameters: false-target evidence + wall-locked bias closure."""
+"""Fit VL53L5CX ToF observation parameters to the experimental false-lock and wall-locked bias time series."""
 from __future__ import annotations
 
 import argparse
 import os
 import sys
 import numpy as np
+import pandas as pd
 from scipy.optimize import differential_evolution
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -13,69 +14,54 @@ sys.path.insert(0, os.path.dirname(_THIS_DIR))
 
 from tof_model import (  # noqa: E402
     ToFModelParams, DEFAULT_PARAMS, replace,
-    build_psd, build_dust_data, evidence_series,
+    build_psd, build_dust_data, evidence_series, size_weighted_bias_driver,
     concentration_scale_for_mass, SIM_T_MAX_MIN,
 )
-from exp_targets import EXP_TARGETS_02, EXP_TARGETS_08  # noqa: E402
 
 DISTANCES_CM = [10, 20, 30, 40, 50, 60]
 DISTANCES_M = [d / 100.0 for d in DISTANCES_CM]
 TIME_BIN_WIDTH_S = 30.0
-FL_THRESHOLD_FRAC = 0.70
 
-N_FRAMES_CAL = 64
 T_GRID_S = np.concatenate([
     np.linspace(0.0, 5.0 * 60.0, 61),
     np.linspace(5.5 * 60.0, SIM_T_MAX_MIN * 60.0, 20),
 ])
 
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
+EXP_TIMESERIES_PATH = os.path.join(os.path.dirname(_THIS_DIR), 'metrics', 'timeseries_metrics.csv')
 
-W_FL = 16.0
-W_SNAP = 5.0
+W_FL = 200.0
 W_BIAS = 4.00
 SCALE_RATIO_REG_WEIGHT = 0.10
 
+TURB_NODES, TURB_WEIGHTS = np.polynomial.hermite_e.hermegauss(7)
+TURB_WEIGHTS = TURB_WEIGHTS / TURB_WEIGHTS.sum()
+
 _BASE_DUST = None
 _BASE_PSD = None
+_EXP_CURVES = None
 
 
-def _snap_time_from_fl(time_s, f_fl, threshold=0.05, n_confirm=3):
-    ok = np.asarray(f_fl) < threshold
-    if len(ok) == 0:
-        return np.nan
-    if np.all(ok):
-        return 0.0
-    for i in range(len(ok) - 1, -1, -1):
-        if not ok[i]:
-            c = i + 1
-            if c + n_confirm <= len(ok):
-                return float(time_s[c])
-            return np.nan
-    return np.nan
-
-
-def _metrics_from_evidence(ev, t_grid_s, dist_cm):
-    p_wall = np.clip(np.asarray(ev['p_wall'], dtype=float), 0.0, 1.0)
-    f_fl_t = 1.0 - p_wall
-    edges = np.arange(0.0, t_grid_s[-1] + TIME_BIN_WIDTH_S, TIME_BIN_WIDTH_S)
-    centers = (edges[:-1] + edges[1:]) / 2.0
-    fl_fracs = []
-    for lo, hi in zip(edges[:-1], edges[1:]):
-        mask = (t_grid_s >= lo) & (t_grid_s < hi)
-        fl_fracs.append(float(np.nanmean(f_fl_t[mask])) if np.any(mask) else np.nan)
-    fl_fracs = np.asarray(fl_fracs)
-    first = centers <= 30.0
-    fl_initial = float(np.nanmean(fl_fracs[first])) if np.any(first) else np.nan
-    snap_s = _snap_time_from_fl(centers, fl_fracs)
-    snap_min = snap_s / 60.0 if np.isfinite(snap_s) else 15.0
-
-    early = t_grid_s <= 180.0
+def _curves_from_evidence(ev, t_grid_s):
+    f_fl_t = 1.0 - np.clip(np.asarray(ev['p_wall'], dtype=float), 0.0, 1.0)
     wall_bias_cm = np.asarray(ev['wall_bias_m'], dtype=float) * 100.0
-    bias_mask = early & (p_wall > 0.05) & np.isfinite(wall_bias_cm)
-    peak_neg_bias = float(np.nanmin(wall_bias_cm[bias_mask])) if np.any(bias_mask) else 0.0
-    return {'fl_initial': fl_initial, 'snap_time_min': snap_min,
-            'peak_neg_bias_cm': peak_neg_bias}
+    bins = np.floor(t_grid_s / TIME_BIN_WIDTH_S).astype(int)
+    n_bins = int(round(SIM_T_MAX_MIN * 60.0 / TIME_BIN_WIDTH_S))
+    f_fl = np.array([f_fl_t[bins == i].mean() for i in range(n_bins)])
+    bias = np.array([wall_bias_cm[bins == i].mean() for i in range(n_bins)])
+    return {'f_fl': f_fl, 'bias_cm': bias}
+
+
+def _get_exp_curves():
+    global _EXP_CURVES
+    if _EXP_CURVES is None:
+        ts = pd.read_csv(EXP_TIMESERIES_PATH)
+        _EXP_CURVES = {}
+        for (g, d), sub in ts.groupby(['loading_g', 'dist_cm']):
+            sub = sub.sort_values('time_bin_center_s')
+            _EXP_CURVES[(float(g), int(d))] = {'f_fl': sub['f_fl_exp'].values,
+                                               'bias_cm': sub['bias_wall_mean_exp'].values}
+    return _EXP_CURVES
 
 
 def _base_params_for_cache():
@@ -95,48 +81,67 @@ def _get_base():
 
 
 def _scaled_dust_data(mass_g, params):
-    _, base_dust = _get_base()
+    psd_cache, base_dust = _get_base()
     base = base_dust[float(mass_g)]
     scale = concentration_scale_for_mass(mass_g, params)
     out = dict(base)
     for k in ['C_bins_mg_m3', 'C_total_mg_m3', 'alpha_ext_1_per_m',
               'alpha_sca_1_per_m', 'beta_mie_1_per_m_sr',
-              'beta_back_1_per_m_sr', 'wall_bias_driver_1_per_m']:
+              'beta_back_1_per_m_sr']:
         if k in base:
             out[k] = np.asarray(base[k]) * scale
+    out['wall_bias_driver_1_per_m'] = scale * size_weighted_bias_driver(
+        base['alpha_bins_ext_1_per_m'], psd_cache[float(mass_g)]['d_rep_um'], params)
     out['concentration_scale'] = scale
     out['q_window'] = np.asarray(base.get('q_window', np.zeros_like(base['t_s'])))
     return out
 
 
-def run_forward_model(params: ToFModelParams, mass_g, n_frames=N_FRAMES_CAL, seed=42):
-    _ = n_frames, seed
+def _turbulence_averaged_evidence(D, t_min, mass_g, psd, dust_data, params):
+    """Expected p_wall and wall-locked bias over the lognormal alpha/beta turbulence of measure_one_frame."""
+    sigma = float(params.sigma_turb)
+    p_wall, bias_num = 0.0, 0.0
+    for z, w in zip(TURB_NODES, TURB_WEIGHTS):
+        mult = np.exp(sigma * z - 0.5 * sigma ** 2)
+        dd = dict(dust_data)
+        dd['alpha_ext_1_per_m'] = dust_data['alpha_ext_1_per_m'] * mult
+        dd['beta_back_1_per_m_sr'] = dust_data['beta_back_1_per_m_sr'] * mult
+        ev = evidence_series(D, t_min, mass_g, psd=psd, dust_data=dd, params=params)
+        p_wall = p_wall + w * ev['p_wall']
+        bias_num = bias_num + w * ev['p_wall'] * ev['wall_bias_m']
+    wall_bias = np.divide(bias_num, p_wall, out=np.zeros_like(p_wall), where=p_wall > 0)
+    return {'p_wall': p_wall, 'wall_bias_m': wall_bias}
+
+
+def run_forward_model(params: ToFModelParams, mass_g):
     psd_cache, _ = _get_base()
     psd = psd_cache[float(mass_g)]
     dust_data = _scaled_dust_data(float(mass_g), params)
     t_min = T_GRID_S / 60.0
     out = {}
     for d_cm, D in zip(DISTANCES_CM, DISTANCES_M):
-        ev = evidence_series(D, t_min, mass_g, psd=psd, dust_data=dust_data, params=params)
-        out[d_cm] = _metrics_from_evidence(ev, T_GRID_S, d_cm)
+        ev = _turbulence_averaged_evidence(D, t_min, mass_g, psd, dust_data, params)
+        out[d_cm] = _curves_from_evidence(ev, T_GRID_S)
     return out
 
 
-def cost_against_targets(metrics, targets):
-    cost = 0.0
-    for d, target in targets.get('fl_initial', {}).items():
-        if d in metrics:
-            cost += W_FL * (metrics[d]['fl_initial'] - target) ** 2
-    for d, target in targets.get('snap_time_min', {}).items():
-        if d in metrics:
-            val = metrics[d]['snap_time_min']
-            cost += W_SNAP * ((val - target) / max(target, 0.25)) ** 2
-    for d, target in targets.get('peak_neg_bias_cm', {}).items():
-        if d in metrics:
-            val = metrics[d]['peak_neg_bias_cm']
-            scale = max(abs(target), 0.25)
-            cost += W_BIAS * ((val - target) / scale) ** 2
-    return float(cost)
+def curve_errors(curves, mass_g):
+    exp = _get_exp_curves()
+    out = {}
+    for d_cm, mod in curves.items():
+        e = exp[(float(mass_g), d_cm)]
+        n = len(e['f_fl'])
+        fl_mse = float(np.nanmean((mod['f_fl'][:n] - e['f_fl']) ** 2))
+        bias_scale = max(float(np.nanmax(np.abs(e['bias_cm']))), 0.25)
+        bias_nmse = float(np.nanmean(((mod['bias_cm'][:n] - e['bias_cm']) / bias_scale) ** 2))
+        out[d_cm] = {'fl_mse': fl_mse, 'bias_nmse': bias_nmse,
+                     'bias_rmse_cm': np.sqrt(bias_nmse) * bias_scale}
+    return out
+
+
+def cost_against_experiment(curves, mass_g):
+    err = curve_errors(curves, mass_g)
+    return float(sum(W_FL * e['fl_mse'] + W_BIAS * e['bias_nmse'] for e in err.values()))
 
 
 ALL_PARAM_NAMES = [
@@ -225,19 +230,18 @@ def objective_joint(x):
     p = params_from_vector_joint(x)
     m08 = run_forward_model(p, mass_g=0.8)
     m02 = run_forward_model(p, mass_g=0.2)
-    cost = cost_against_targets(m08, EXP_TARGETS_08) + cost_against_targets(m02, EXP_TARGETS_02)
+    cost = cost_against_experiment(m08, 0.8) + cost_against_experiment(m02, 0.2)
     log_ratio = np.log10(max(p.concentration_scale_0p2, 1e-30) / max(p.concentration_scale_0p8, 1e-30))
     cost += SCALE_RATIO_REG_WEIGHT * log_ratio ** 2
     return float(cost)
 
 
-def print_metrics(metrics, title):
+def print_metrics(curves, mass_g, title):
+    err = curve_errors(curves, mass_g)
     print('\n' + title)
-    print('  dist  FL_init  snap(min)  peak_bias(cm)')
+    print('  dist  FL_rmse  bias_rmse(cm)')
     for d in DISTANCES_CM:
-        m = metrics[d]
-        print(f'  {d:3d}   {m["fl_initial"]:7.3f}   {m["snap_time_min"]:8.2f}'
-              f'   {m["peak_neg_bias_cm"]:+10.3f}')
+        print(f'  {d:3d}   {np.sqrt(err[d]["fl_mse"]):7.3f}   {err[d]["bias_rmse_cm"]:10.3f}')
 
 
 def write_params_file(p: ToFModelParams, objective_value: float, path: str, mode: str):
@@ -271,8 +275,8 @@ def params_from_file(path: str) -> ToFModelParams:
 
 def fit_joint(maxiter=80):
     print('Evaluating revised default model...')
-    print_metrics(run_forward_model(DEFAULT_PARAMS, 0.8), 'Default model (0.8 g)')
-    print_metrics(run_forward_model(DEFAULT_PARAMS, 0.2), 'Default model (0.2 g)')
+    print_metrics(run_forward_model(DEFAULT_PARAMS, 0.8), 0.8, 'Default model (0.8 g)')
+    print_metrics(run_forward_model(DEFAULT_PARAMS, 0.2), 0.2, 'Default model (0.2 g)')
     print('\nRunning differential evolution for revised joint model...')
     result = differential_evolution(objective_joint, BOUNDS_JOINT, seed=42,
                                     maxiter=maxiter, popsize=4, tol=1e-3,
@@ -280,8 +284,8 @@ def fit_joint(maxiter=80):
     p = params_from_vector_joint(result.x)
     m08 = run_forward_model(p, 0.8)
     m02 = run_forward_model(p, 0.2)
-    print_metrics(m08, 'Fitted model (0.8 g)')
-    print_metrics(m02, 'Fitted model (0.2 g)')
+    print_metrics(m08, 0.8, 'Fitted model (0.8 g)')
+    print_metrics(m02, 0.2, 'Fitted model (0.2 g)')
     print('\nFitted parameter block:')
     for name in ALL_PARAM_NAMES:
         print(f'  {name} = {getattr(p, name):.9g}')
@@ -292,70 +296,14 @@ def fit_joint(maxiter=80):
     return result
 
 
-def fit_bias_only():
-    """Second-stage fit of the wall-bias closure with lock params fixed."""
-    from scipy.optimize import least_squares
-
-    target_rows = []
-    for mass_g, targets in [(0.2, EXP_TARGETS_02), (0.8, EXP_TARGETS_08)]:
-        for d_cm, target_cm in targets['peak_neg_bias_cm'].items():
-            if d_cm > 40:
-                continue
-            target_rows.append((mass_g, d_cm, target_cm))
-
-    def params_from_x(x):
-        log_gain, size_power, driver_power, center, width = x
-        return replace(DEFAULT_PARAMS,
-                       wall_bias_centroid_gain=10.0 ** log_gain,
-                       wall_bias_size_power=float(size_power),
-                       wall_bias_driver_power=float(driver_power),
-                       wall_bias_distance_center_m=float(center),
-                       wall_bias_distance_width_m=float(width),
-                       bias_scale=0.0)
-
-    def residual(x):
-        p = params_from_x(x)
-        out = []
-        for mass_g, d_cm, target_cm in target_rows:
-            dust = build_dust_data(mass_g, t_meas_s=np.array([0.0]), params=p)
-            ev = evidence_series(d_cm / 100.0, np.array([0.0]), mass_g,
-                                 dust_data=dust, params=p)
-            pred_cm = float(ev['wall_bias_m'][0]) * 100.0
-            scale = max(abs(target_cm), 0.25)
-            w = 2.0 if (mass_g == 0.8 and d_cm in (20, 30, 40)) else 1.0
-            out.append(np.sqrt(w) * (pred_cm - target_cm) / scale)
-        return np.asarray(out)
-
-    x0 = np.array([
-        np.log10(DEFAULT_PARAMS.wall_bias_centroid_gain),
-        DEFAULT_PARAMS.wall_bias_size_power,
-        DEFAULT_PARAMS.wall_bias_driver_power,
-        DEFAULT_PARAMS.wall_bias_distance_center_m,
-        DEFAULT_PARAMS.wall_bias_distance_width_m,
-    ])
-    lower = [-4.0, 0.0, 0.5, 0.12, 0.03]
-    upper = [1.0, 8.0, 3.0, 0.34, 0.20]
-    res = least_squares(residual, x0, bounds=(lower, upper))
-    p = params_from_x(res.x)
-    print('\nBias-only fitted parameter block:')
-    for name in ['wall_bias_centroid_gain', 'wall_bias_size_power',
-                 'wall_bias_driver_power', 'wall_bias_distance_center_m',
-                 'wall_bias_distance_width_m', 'bias_scale']:
-        print(f'  {name} = {getattr(p, name):.10g}')
-    print(f'  normalized RMS residual = {np.sqrt(np.mean(res.fun**2)):.4f}')
-    return p, res
-
 def main():
     ap = argparse.ArgumentParser(description='Fit revised ToF observation model')
     ap.add_argument('--maxiter', type=int, default=80)
     ap.add_argument('--eval-only', action='store_true')
-    ap.add_argument('--bias-only', action='store_true')
     args = ap.parse_args()
-    if args.bias_only:
-        fit_bias_only()
-    elif args.eval_only:
-        print_metrics(run_forward_model(DEFAULT_PARAMS, 0.8), 'Default model (0.8 g)')
-        print_metrics(run_forward_model(DEFAULT_PARAMS, 0.2), 'Default model (0.2 g)')
+    if args.eval_only:
+        print_metrics(run_forward_model(DEFAULT_PARAMS, 0.8), 0.8, 'Default model (0.8 g)')
+        print_metrics(run_forward_model(DEFAULT_PARAMS, 0.2), 0.2, 'Default model (0.2 g)')
     else:
         fit_joint(maxiter=args.maxiter)
 

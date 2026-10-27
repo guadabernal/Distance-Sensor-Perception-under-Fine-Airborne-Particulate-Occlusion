@@ -11,10 +11,13 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'dust_model'))
 from plot_style import (
     setup_ieee_style, save_fig,
     IEEE_SINGLE_COL, IEEE_DOUBLE_COL,
     TOL_MUTED, LOADING_COLORS, DISTANCE_COLORS,
+    sort_by_concentration, CONC_AXIS_LABEL_TWO_LINE,
+    CONC_AXIS_LABEL_SHORT,
 )
 
 from ir_analysis import (
@@ -25,6 +28,35 @@ from ir_analysis import (
     DISTANCES_CM, DUST_LOADINGS_G, TRIALS,
 )
 from ir_model import simulate_experiment
+from dust_model import get_measurement_total_concentration_g_m3
+
+
+CONC_XLIMS = {0.2: (0.9, 2.35), 0.8: (3.8, 9.1)}
+CONC_XTICKS = {0.2: [1.0, 1.6, 2.2], 0.8: [4.0, 6.5, 9.0]}
+CONC_XLIMS_BOTH = (0.8, 9.2)
+CONC_XTICKS_BOTH = [1, 5, 9]
+
+_conc_cache = {}
+
+
+def _conc_g_m3(grams, t_s):
+    """Modeled chamber-average airborne concentration [g/m^3] at phase-local t_s."""
+    t = np.asarray(t_s, dtype=float)
+    key = (float(grams), t.tobytes())
+    if key not in _conc_cache:
+        _conc_cache[key] = get_measurement_total_concentration_g_m3(
+            float(grams), t)
+    return _conc_cache[key]
+
+
+def _x(grams, t_s, x_axis, *arrays):
+    """Plot x-values (time [min] or modeled C_air), with companion arrays reordered to match."""
+    if x_axis == 'conc':
+        return sort_by_concentration(_conc_g_m3(grams, t_s), *arrays)
+    return (t_s / 60.0,) + arrays
+
+
+X_LABELS = {'time': 'Time (min)', 'conc': CONC_AXIS_LABEL_SHORT}
 
 
 def _fmt(val, decimals=2):
@@ -71,7 +103,7 @@ def plot_measured_vs_actual(control_data, save_path):
     print(f'Saved: {save_path}')
 
 
-def plot_error_comparison_grid(error_comp_data, save_path):
+def plot_error_comparison_grid(error_comp_data, save_path, x_axis='time'):
     """Fig 2: 5x2 grid (rows=distances, cols=loadings) — trials, mean+/-SD, and model."""
     setup_ieee_style()
     n_dists = len(DISTANCES_CM)
@@ -82,31 +114,37 @@ def plot_error_comparison_grid(error_comp_data, save_path):
 
     for col, grams in enumerate(DUST_LOADINGS_G):
         for row, (d_cm, trial_errors,
-                  model_t_min, model_err) in enumerate(error_comp_data[grams]):
+                  model_t_s, model_err) in enumerate(error_comp_data[grams]):
             ax = axes[row, col]
             color = DISTANCE_COLORS[d_cm]
 
-            for t_min, err in trial_errors:
-                ax.plot(t_min, err, color=color, linewidth=0.5, alpha=0.35)
+            for t_s, err in trial_errors:
+                ax.plot(*_x(grams, t_s, x_axis, err),
+                        color=color, linewidth=0.5, alpha=0.35)
 
             if len(trial_errors) > 1:
                 min_len = min(len(e) for _, e in trial_errors)
                 stacked = np.column_stack([e[:min_len] for _, e in trial_errors])
                 t_common = trial_errors[0][0][:min_len]
                 err_mean = stacked.mean(axis=1)
-                err_std = stacked.std(axis=1)
-                ax.plot(t_common, err_mean, color=color, linewidth=1.0)
-                ax.fill_between(t_common, err_mean - err_std,
+                err_std = stacked.std(axis=1, ddof=1)
+                x, err_mean, err_std = _x(grams, t_common, x_axis, err_mean, err_std)
+                ax.plot(x, err_mean, color=color, linewidth=1.0)
+                ax.fill_between(x, err_mean - err_std,
                                 err_mean + err_std,
                                 color=color, alpha=0.18)
 
-            ax.plot(model_t_min, model_err, color=color, linewidth=0.9, ls='--')
+            ax.plot(*_x(grams, model_t_s, x_axis, model_err),
+                    color=color, linewidth=0.9, ls='--')
             ax.axhline(0, color='0.4', ls='--', lw=0.6)
 
+            if x_axis == 'conc':
+                ax.set_xlim(CONC_XLIMS[grams])
+                ax.set_xticks(CONC_XTICKS[grams])
             if row == 0:
                 ax.set_title(f'{grams} g')
             if row == n_dists - 1:
-                ax.set_xlabel('Time (min)')
+                ax.set_xlabel(X_LABELS[x_axis])
             else:
                 ax.tick_params(labelbottom=False)
             if col == 0:
@@ -140,7 +178,7 @@ def plot_error_comparison_grid(error_comp_data, save_path):
     print(f'Saved: {save_path}')
 
 
-def plot_error_comparison_grid_pct(error_comp_data, save_path):
+def plot_error_comparison_grid_pct(error_comp_data, save_path, x_axis='time'):
     """Fig 2v2: same grid as fig 2 with percent error on the y-axis."""
     setup_ieee_style()
     n_dists = len(DISTANCES_CM)
@@ -151,15 +189,16 @@ def plot_error_comparison_grid_pct(error_comp_data, save_path):
 
     for col, grams in enumerate(DUST_LOADINGS_G):
         for row, (d_cm, trial_errors,
-                  model_t_min, model_err) in enumerate(error_comp_data[grams]):
+                  model_t_s, model_err) in enumerate(error_comp_data[grams]):
             ax = axes[row, col]
             color = DISTANCE_COLORS[d_cm]
 
             trial_errors_pct = []
-            for t_min, err in trial_errors:
+            for t_s, err in trial_errors:
                 err_pct = err / d_cm * 100.0
-                ax.plot(t_min, err_pct, color=color, linewidth=0.5, alpha=0.35)
-                trial_errors_pct.append((t_min, err_pct))
+                ax.plot(*_x(grams, t_s, x_axis, err_pct),
+                        color=color, linewidth=0.5, alpha=0.35)
+                trial_errors_pct.append((t_s, err_pct))
 
             if len(trial_errors_pct) > 1:
                 min_len = min(len(e) for _, e in trial_errors_pct)
@@ -167,21 +206,25 @@ def plot_error_comparison_grid_pct(error_comp_data, save_path):
                     [e[:min_len] for _, e in trial_errors_pct])
                 t_common = trial_errors_pct[0][0][:min_len]
                 err_mean = stacked.mean(axis=1)
-                err_std = stacked.std(axis=1)
-                ax.plot(t_common, err_mean, color=color, linewidth=1.0)
-                ax.fill_between(t_common, err_mean - err_std,
+                err_std = stacked.std(axis=1, ddof=1)
+                x, err_mean, err_std = _x(grams, t_common, x_axis, err_mean, err_std)
+                ax.plot(x, err_mean, color=color, linewidth=1.0)
+                ax.fill_between(x, err_mean - err_std,
                                 err_mean + err_std,
                                 color=color, alpha=0.18)
 
             model_err_pct = model_err / d_cm * 100.0
-            ax.plot(model_t_min, model_err_pct, color=color,
+            ax.plot(*_x(grams, model_t_s, x_axis, model_err_pct), color=color,
                     linewidth=0.9, ls='--')
             ax.axhline(0, color='0.4', ls='--', lw=0.6)
 
+            if x_axis == 'conc':
+                ax.set_xlim(CONC_XLIMS[grams])
+                ax.set_xticks(CONC_XTICKS[grams])
             if row == 0:
                 ax.set_title(f'{grams} g')
             if row == n_dists - 1:
-                ax.set_xlabel('Time (min)')
+                ax.set_xlabel(X_LABELS[x_axis])
             else:
                 ax.tick_params(labelbottom=False)
             if col == 0:
@@ -216,7 +259,7 @@ def plot_error_comparison_grid_pct(error_comp_data, save_path):
     print(f'Saved: {save_path}')
 
 
-def plot_error_comparison_overlay_pct(error_comp_data, save_path):
+def plot_error_comparison_overlay_pct(error_comp_data, save_path, x_axis='time'):
     """Fig 2v3: 2x3 grid (one panel per distance), both loadings overlaid."""
     setup_ieee_style()
     GRID_DISTANCES = [10, 20, 30, 40, 50, 60]
@@ -237,11 +280,11 @@ def plot_error_comparison_overlay_pct(error_comp_data, save_path):
         if has_data:
             for grams in DUST_LOADINGS_G:
                 entry = [e for e in error_comp_data[grams] if e[0] == d_cm][0]
-                _, trial_errors, model_t_min, model_err = entry
+                _, trial_errors, model_t_s, model_err = entry
                 color = LOADING_COLORS[grams]
 
-                for t_min, err in trial_errors:
-                    ax.plot(t_min, err / d_cm * 100.0,
+                for t_s, err in trial_errors:
+                    ax.plot(*_x(grams, t_s, x_axis, err / d_cm * 100.0),
                             color=color, linewidth=0.5, alpha=0.25)
 
                 if len(trial_errors) > 1:
@@ -250,13 +293,15 @@ def plot_error_comparison_overlay_pct(error_comp_data, save_path):
                         [e[:min_len] / d_cm * 100.0 for _, e in trial_errors])
                     t_common = trial_errors[0][0][:min_len]
                     err_mean = stacked.mean(axis=1)
-                    err_std = stacked.std(axis=1)
-                    ax.plot(t_common, err_mean, color=color, linewidth=1.0,
+                    err_std = stacked.std(axis=1, ddof=1)
+                    x, err_mean, err_std = _x(grams, t_common, x_axis,
+                                              err_mean, err_std)
+                    ax.plot(x, err_mean, color=color, linewidth=1.0,
                             label=f'{grams} g')
-                    ax.fill_between(t_common, err_mean - err_std,
+                    ax.fill_between(x, err_mean - err_std,
                                     err_mean + err_std, color=color, alpha=0.15)
 
-                ax.plot(model_t_min, model_err / d_cm * 100.0,
+                ax.plot(*_x(grams, model_t_s, x_axis, model_err / d_cm * 100.0),
                         color=color, linewidth=0.9, ls='--')
         else:
             ax.text(0.5, 0.5, 'No data', transform=ax.transAxes,
@@ -270,8 +315,11 @@ def plot_error_comparison_overlay_pct(error_comp_data, save_path):
         if d_cm in YFMT:
             ax.yaxis.set_major_formatter(FormatStrFormatter(YFMT[d_cm]))
 
+        if x_axis == 'conc':
+            ax.set_xlim(CONC_XLIMS_BOTH)
+            ax.set_xticks(CONC_XTICKS_BOTH)
         if row == n_rows - 1 or idx == len(GRID_DISTANCES) - 1:
-            ax.set_xlabel('Time (min)')
+            ax.set_xlabel(X_LABELS[x_axis])
         else:
             ax.tick_params(labelbottom=False)
         if col == 0:
@@ -301,7 +349,7 @@ def plot_error_comparison_overlay_pct(error_comp_data, save_path):
     print(f'Saved: {save_path}')
 
 
-def plot_error_comparison_overlay_pct_wide(error_comp_data, save_path):
+def plot_error_comparison_overlay_pct_wide(error_comp_data, save_path, x_axis='time'):
     """Fig 2v4: 1x6 wide strip for IEEE double-column width."""
     setup_ieee_style()
     GRID_DISTANCES = [10, 20, 30, 40, 50, 60]
@@ -323,11 +371,11 @@ def plot_error_comparison_overlay_pct_wide(error_comp_data, save_path):
         if has_data:
             for grams in DUST_LOADINGS_G:
                 entry = [e for e in error_comp_data[grams] if e[0] == d_cm][0]
-                _, trial_errors, model_t_min, model_err = entry
+                _, trial_errors, model_t_s, model_err = entry
                 color = LOADING_COLORS[grams]
 
-                for t_min, err in trial_errors:
-                    ax.plot(t_min, err / d_cm * 100.0,
+                for t_s, err in trial_errors:
+                    ax.plot(*_x(grams, t_s, x_axis, err / d_cm * 100.0),
                             color=color, linewidth=0.4, alpha=0.25)
 
                 if len(trial_errors) > 1:
@@ -336,13 +384,15 @@ def plot_error_comparison_overlay_pct_wide(error_comp_data, save_path):
                         [e[:min_len] / d_cm * 100.0 for _, e in trial_errors])
                     t_common = trial_errors[0][0][:min_len]
                     err_mean = stacked.mean(axis=1)
-                    err_std = stacked.std(axis=1)
-                    ax.plot(t_common, err_mean, color=color, linewidth=0.8,
+                    err_std = stacked.std(axis=1, ddof=1)
+                    x, err_mean, err_std = _x(grams, t_common, x_axis,
+                                              err_mean, err_std)
+                    ax.plot(x, err_mean, color=color, linewidth=0.8,
                             label=f'{grams} g')
-                    ax.fill_between(t_common, err_mean - err_std,
+                    ax.fill_between(x, err_mean - err_std,
                                     err_mean + err_std, color=color, alpha=0.15)
 
-                ax.plot(model_t_min, model_err / d_cm * 100.0,
+                ax.plot(*_x(grams, model_t_s, x_axis, model_err / d_cm * 100.0),
                         color=color, linewidth=0.7, ls='--')
         else:
             ax.text(0.5, 0.5, 'No data', transform=ax.transAxes,
@@ -356,7 +406,10 @@ def plot_error_comparison_overlay_pct_wide(error_comp_data, save_path):
         if d_cm in YFMT:
             ax.yaxis.set_major_formatter(FormatStrFormatter(YFMT[d_cm]))
 
-        ax.set_xlabel('Time (min)')
+        if x_axis == 'conc':
+            ax.set_xlim(CONC_XLIMS_BOTH)
+            ax.set_xticks(CONC_XTICKS_BOTH)
+        ax.set_xlabel(X_LABELS[x_axis])
         if idx == 0:
             ax.set_ylabel('Error (%)')
 
@@ -413,7 +466,7 @@ def plot_error_comparison_overlay_pct_v5(error_comp_data, save_path):
         if has_data:
             for grams in DUST_LOADINGS_G:
                 entry = [e for e in error_comp_data[grams] if e[0] == d_cm][0]
-                _, trial_errors, model_t_min, model_err = entry
+                _, trial_errors, model_t_s, model_err = entry
                 exp_color = EXP_COLORS[grams]
                 mod_color = MODEL_COLORS[grams]
 
@@ -423,12 +476,12 @@ def plot_error_comparison_overlay_pct_v5(error_comp_data, save_path):
                         [e[:min_len] / d_cm * 100.0 for _, e in trial_errors])
                     t_common = trial_errors[0][0][:min_len]
                     err_mean = stacked.mean(axis=1)
-                    err_std = stacked.std(axis=1)
-                    ax.fill_between(t_common, err_mean - err_std,
+                    err_std = stacked.std(axis=1, ddof=1)
+                    ax.fill_between(t_common / 60.0, err_mean - err_std,
                                     err_mean + err_std, color=exp_color, alpha=0.18)
-                    ax.plot(t_common, err_mean, color=exp_color, linewidth=0.9)
+                    ax.plot(t_common / 60.0, err_mean, color=exp_color, linewidth=0.9)
 
-                ax.plot(model_t_min, model_err / d_cm * 100.0,
+                ax.plot(model_t_s / 60.0, model_err / d_cm * 100.0,
                         color=mod_color, linewidth=0.9, ls='--')
         else:
             ax.text(0.5, 0.5, 'No data', transform=ax.transAxes,
@@ -466,6 +519,113 @@ def plot_error_comparison_overlay_pct_v5(error_comp_data, save_path):
                bbox_to_anchor=(0.5, -0.03))
 
     fig.tight_layout(rect=[0, 0.06, 1, 1])
+    save_fig(fig, save_path)
+    plt.close(fig)
+
+
+def plot_error_comparison_overlay_pct_v6(error_comp_data, save_path):
+    """Fig 2v6: 2x6 grid (rows=loadings) vs modeled C_air, mean+/-SD and model."""
+    setup_ieee_style()
+    GRID_DISTANCES = [10, 20, 30, 40, 50, 60]
+    n_rows = len(DUST_LOADINGS_G)
+    n_cols = len(GRID_DISTANCES)
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(IEEE_DOUBLE_COL, 3.4))
+
+    from matplotlib.ticker import LinearLocator, FormatStrFormatter
+    YLIMS = {
+        0.2: {10: (-1, 1), 20: (-2, 0), 30: (-4, 0),
+              40: (-10, 0), 50: (-32, 0), 60: (-40, 0)},
+        0.8: {10: (-1, 1), 20: (-2, 0), 30: (-10, 0),
+              40: (-32, 0), 50: (-40, 0), 60: (-65, 0)},
+    }
+    YFMT = {10: '%.1f', 20: '%.1f', 30: '%.1f',
+            40: '%.1f', 50: '%.1f', 60: '%.1f'}
+
+    def _lighten(hex_color, amount=0.4):
+        h = hex_color.lstrip('#')
+        r, g, b = int(h[:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        r = int(r + (255 - r) * amount)
+        g = int(g + (255 - g) * amount)
+        b = int(b + (255 - b) * amount)
+        return f'#{r:02x}{g:02x}{b:02x}'
+
+    EXP_COLORS = {g: _lighten(LOADING_COLORS[g]) for g in DUST_LOADINGS_G}
+    MODEL_COLORS = LOADING_COLORS
+
+    CONC_DATA_XLIMS = {
+        g: (float(_conc_g_m3(g, np.array([900.0]))[0]),
+            float(_conc_g_m3(g, np.array([0.0]))[0]))
+        for g in DUST_LOADINGS_G
+    }
+    CONC_DATA_XTICKS = {0.2: [1.0, 1.6, 2.2], 0.8: [4.0, 6.0, 8.0]}
+
+    for row, grams in enumerate(DUST_LOADINGS_G):
+        for col, d_cm in enumerate(GRID_DISTANCES):
+            ax = axes[row, col]
+            has_data = d_cm in DISTANCES_CM
+
+            if has_data:
+                entry = [e for e in error_comp_data[grams] if e[0] == d_cm][0]
+                _, trial_errors, model_t_s, model_err = entry
+                exp_color = EXP_COLORS[grams]
+                mod_color = MODEL_COLORS[grams]
+
+                if len(trial_errors) > 1:
+                    min_len = min(len(e) for _, e in trial_errors)
+                    stacked = np.column_stack(
+                        [e[:min_len] / d_cm * 100.0 for _, e in trial_errors])
+                    t_common = trial_errors[0][0][:min_len]
+                    err_mean = stacked.mean(axis=1)
+                    err_std = stacked.std(axis=1, ddof=1)
+                    x, err_mean, err_std = _x(grams, t_common, 'conc',
+                                              err_mean, err_std)
+                    ax.fill_between(x, err_mean - err_std,
+                                    err_mean + err_std, color=exp_color, alpha=0.18)
+                    ax.plot(x, err_mean, color=exp_color, linewidth=0.9)
+
+                ax.plot(*_x(grams, model_t_s, 'conc', model_err / d_cm * 100.0),
+                        color=mod_color, linewidth=0.9, ls='--')
+            else:
+                ax.text(0.5, 0.5, 'No data', transform=ax.transAxes,
+                        ha='center', va='center', fontsize=7, color='0.5')
+
+            ax.axhline(0, color='0.4', ls='--', lw=0.5)
+            if row == 0:
+                ax.set_title(f'{d_cm} cm', fontsize=8)
+            ylims_g = YLIMS[grams]
+            if d_cm in ylims_g:
+                ax.set_ylim(ylims_g[d_cm])
+            ax.yaxis.set_major_locator(LinearLocator(numticks=5))
+            if d_cm in YFMT:
+                ax.yaxis.set_major_formatter(FormatStrFormatter(YFMT[d_cm]))
+
+            ax.set_xlim(CONC_DATA_XLIMS[grams])
+            ax.set_xticks(CONC_DATA_XTICKS[grams])
+            ax.set_xlabel(CONC_AXIS_LABEL_SHORT)
+            if col == 0:
+                ax.set_ylabel(f'{grams} g\nError (%)')
+
+    style_handles = [
+        Line2D([], [], color=EXP_COLORS[0.2], ls='-', lw=0.9,
+               label='0.2 g mean'),
+        Patch(facecolor=EXP_COLORS[0.2], alpha=0.18,
+              label='0.2 g $\\pm$1 SD'),
+        Line2D([], [], color=MODEL_COLORS[0.2], ls='--', lw=0.9,
+               label='0.2 g model'),
+        Line2D([], [], color=EXP_COLORS[0.8], ls='-', lw=0.9,
+               label='0.8 g mean'),
+        Patch(facecolor=EXP_COLORS[0.8], alpha=0.18,
+              label='0.8 g $\\pm$1 SD'),
+        Line2D([], [], color=MODEL_COLORS[0.8], ls='--', lw=0.9,
+               label='0.8 g model'),
+    ]
+    fig.legend(handles=style_handles,
+               loc='lower center', ncol=6, fontsize=6,
+               bbox_to_anchor=(0.5, -0.02))
+
+    fig.tight_layout(rect=[0, 0.02, 1, 1], w_pad=0.15, h_pad=1.1)
     save_fig(fig, save_path)
     plt.close(fig)
 
@@ -618,8 +778,8 @@ def plot_tau_vs_distance(df_metrics, save_path):
     print(f'Saved: {save_path}')
 
 
-def plot_residual_analysis(residual_data, save_path):
-    """Fig 6: 2x1 — residual (experiment - model) vs time."""
+def plot_residual_analysis(residual_data, save_path, x_axis='time'):
+    """Fig 6: 2x1 — residual (experiment - model) vs time or modeled C_air."""
     setup_ieee_style()
     fig, (ax_02, ax_08) = plt.subplots(
         2, 1, figsize=(IEEE_SINGLE_COL, 4.8))
@@ -627,11 +787,14 @@ def plot_residual_analysis(residual_data, save_path):
     for idx, (ax, grams, title) in enumerate(
         [(ax_02, 0.2, '0.2 g'), (ax_08, 0.8, '0.8 g')]
     ):
-        for d_cm, t_min, residual in residual_data[grams]:
-            ax.plot(t_min, residual, color=DISTANCE_COLORS[d_cm],
+        for d_cm, t_s, residual in residual_data[grams]:
+            ax.plot(*_x(grams, t_s, x_axis, residual), color=DISTANCE_COLORS[d_cm],
                     linewidth=0.9, label=f'{d_cm} cm')
         ax.axhline(0, color='0.4', ls='--', lw=0.6)
-        if idx == 1:
+        if x_axis == 'conc':
+            ax.set_xlim(CONC_XLIMS[grams])
+            ax.set_xlabel(CONC_AXIS_LABEL_TWO_LINE if idx == 1 else CONC_AXIS_LABEL_SHORT)
+        elif idx == 1:
             ax.set_xlabel('Time (min)')
         ax.set_ylabel('Residual (cm)')
         ax.set_title(f'Experiment $-$ Model ({title})')
@@ -725,16 +888,14 @@ def generate_plots():
                     phase_time_seconds(sub),
                     sub['distance_cm_smooth'].values,
                 )
-                t_min = t_blk / 60.0
                 err = pd.Series(d_blk - d_cm).rolling(
                     kern, min_periods=1, center=True).mean().values
-                trial_errors.append((t_min, err))
+                trial_errors.append((t_blk, err))
 
             sim = simulate_experiment(distance_cm=d_cm, mass_g=grams)
-            model_t_min = sim['t_s'] / 60.0
             error_comp_data[grams].append((
                 d_cm, trial_errors,
-                model_t_min, sim['distance_est_cm'] - d_cm,
+                sim['t_s'], sim['distance_est_cm'] - d_cm,
             ))
 
     plot_error_comparison_grid(error_comp_data, os.path.join(
@@ -751,6 +912,22 @@ def generate_plots():
 
     plot_error_comparison_overlay_pct_v5(error_comp_data, os.path.join(
         output_dir, 'fig2_v5_overlay_pct_error_mean_std.png'))
+
+    plot_error_comparison_grid(error_comp_data, os.path.join(
+        output_dir, 'fig2_experimental_vs_model_error_vs_concentration.png'), x_axis='conc')
+
+    plot_error_comparison_grid_pct(error_comp_data, os.path.join(
+        output_dir,
+        'fig2_v2_experimental_vs_model_pct_error_vs_concentration.png'), x_axis='conc')
+
+    plot_error_comparison_overlay_pct(error_comp_data, os.path.join(
+        output_dir, 'fig2_v3_overlay_pct_error_vs_concentration.png'), x_axis='conc')
+
+    plot_error_comparison_overlay_pct_wide(error_comp_data, os.path.join(
+        output_dir, 'fig2_v4_overlay_pct_error_wide_vs_concentration.png'), x_axis='conc')
+
+    plot_error_comparison_overlay_pct_v6(error_comp_data, os.path.join(
+        output_dir, 'fig2_v6_overlay_pct_error_vs_concentration.png'))
 
     print('\nComputing metrics ...')
     df_metrics = compute_all_metrics()
@@ -793,7 +970,7 @@ def generate_plots():
 
             decay_data[grams].append((
                 d_cm, t_min, error, fit_curve, decay['tau_s'], model_err))
-            residual_data[grams].append((d_cm, t_min, error - model_err))
+            residual_data[grams].append((d_cm, t_block, error - model_err))
 
     plot_exponential_decay_fits(decay_data, os.path.join(
         output_dir, 'fig4_exponential_decay_fits.png'))
@@ -803,6 +980,9 @@ def generate_plots():
 
     plot_residual_analysis(residual_data, os.path.join(
         output_dir, 'fig6_residual_analysis.png'))
+
+    plot_residual_analysis(residual_data, os.path.join(
+        output_dir, 'fig6_residual_vs_concentration.png'), x_axis='conc')
 
     print('\nComputing ANOVA ...')
     anova_table = compute_anova()

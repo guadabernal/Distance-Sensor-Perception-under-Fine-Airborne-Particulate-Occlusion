@@ -1,0 +1,3 @@
+window,observed_partial_f,df_num,df_denom,n_permutations,n_extreme,p_value,random_seed,n_observations
+full_15min,16.21954912753818,12,48,100000,0,9.99990000099999e-06,20260819,72
+initial_30s,16.51525196936378,12,48,100000,0,9.99990000099999e-06,20260819,72

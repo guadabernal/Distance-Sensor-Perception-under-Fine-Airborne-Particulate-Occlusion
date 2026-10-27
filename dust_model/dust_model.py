@@ -362,3 +362,17 @@ def get_measurement_concentration_timeseries(
     out['t_meas_s'] = t_meas
     out['pre_measurement_s'] = float(pre_measurement_s)
     return out
+
+
+def get_measurement_total_concentration_g_m3(
+    mass_g: float,
+    t_meas_s: np.ndarray,
+    pre_measurement_s: float = SETTLING_TIME_S,
+) -> np.ndarray:
+    """Modeled chamber-average airborne dust mass concentration [g/m^3]."""
+    out = get_measurement_concentration_timeseries(
+        mass_g,
+        np.asarray(t_meas_s, dtype=float),
+        pre_measurement_s=pre_measurement_s,
+    )
+    return out['C_total_mg_m3'] / 1000.0

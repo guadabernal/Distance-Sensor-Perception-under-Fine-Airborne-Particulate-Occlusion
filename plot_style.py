@@ -4,6 +4,20 @@ import io
 import time
 import matplotlib
 import matplotlib.pyplot as plt
+import numpy as np
+
+
+CONC_AXIS_LABEL = r'Modeled airborne dust concentration, $C_{\mathrm{air}}$ (g m$^{-3}$)'
+CONC_AXIS_LABEL_TWO_LINE = ('Modeled airborne dust concentration,'
+                            '\n' r'$C_{\mathrm{air}}$ (g m$^{-3}$)')
+CONC_AXIS_LABEL_SHORT = r'$C_{\mathrm{air}}$ (g m$^{-3}$)'
+
+
+def sort_by_concentration(c_g_m3, *arrays):
+    """Stable-sort concentration into increasing order, reordering companion arrays."""
+    c = np.asarray(c_g_m3, dtype=float)
+    order = np.argsort(c, kind='mergesort')
+    return (c[order],) + tuple(np.asarray(a)[order] for a in arrays)
 
 
 IEEE_SINGLE_COL = 3.5
